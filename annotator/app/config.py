@@ -4,8 +4,16 @@ import os
 from pathlib import Path
 
 
+def _app_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _repo_root() -> Path:
+    return _app_root().parent
+
+
 def _load_dotenv() -> None:
-    path = Path(__file__).resolve().parent.parent / ".env"
+    path = _app_root() / ".env"
     if not path.is_file():
         return
     for line in path.read_text().splitlines():
@@ -22,12 +30,12 @@ _load_dotenv()
 
 
 def _default_workspace() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+    return Path(os.environ.get("WORKSPACE_ROOT", _repo_root().parent)).resolve()
 
 
 class Settings:
     def __init__(self) -> None:
-        w = Path(os.environ.get("WORKSPACE_ROOT", _default_workspace())).resolve()
+        w = _default_workspace()
         self.workspace_root = w
         self.sam3_repo = Path(os.environ.get("SAM3_REPO", w / "sam3"))
         self.sam3_checkpoint = Path(
@@ -63,6 +71,4 @@ class Settings:
                 self.medsam3_repo / "weights" / "best_lora_weights.pt",
             )
         )
-        self.static_dir = Path(
-            os.environ.get("ANNOTATOR_STATIC", Path(__file__).resolve().parent.parent / "static")
-        )
+        self.static_dir = Path(os.environ.get("ANNOTATOR_STATIC", _app_root() / "static"))
