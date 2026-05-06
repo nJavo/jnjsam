@@ -1,0 +1,8 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-dotenv>=1.0
+pydantic>=2.0
+numpy
+opencv-python-headless
+PyYAML
+Pillow

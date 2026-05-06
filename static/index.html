@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Annotator</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { background:#0f0f0f; color:#e5e5e5; font-family:system-ui,sans-serif; }
+  #canvas-wrap { position:relative; display:inline-block; cursor:crosshair; }
+  canvas { display:block; max-width:100%; border-radius:8px; }
+  .dot { position:absolute; width:16px; height:16px; border-radius:50%; transform:translate(-50%,-50%);
+         pointer-events:none; border:2px solid white; }
+  select option { background:#1c1c1c; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+const post = (path, body) =>
+  fetch(path, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) }).then(r=>r.json());
+
+function MetaBadge({ label, value }) {
+  return (
+    <div className="bg-zinc-800 rounded-lg px-3 py-2 text-center">
+      <div className="text-xs text-zinc-500 mb-0.5">{label}</div>
+      <div className="text-sm font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function App() {
+  const [meta, setMeta] = useState(null);
+  const [videos, setVideos] = useState([]);
+  const [videosDir, setVideosDir] = useState("");
+  const [videoFile, setVideoFile] = useState("");
+  const [videoInfo, setVideoInfo] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [totalFrames, setTotalFrames] = useState(0);
+  const [frameIdx, setFrameIdx] = useState(0);
+  const [frameImg, setFrameImg] = useState(null);
+  const [prompt, setPrompt] = useState("gallbladder");
+  const [mode, setMode] = useState("text");
+  const [points, setPoints] = useState([]);
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [videob64, setVideob64] = useState(null);
+  const [nMasks, setNMasks] = useState(null);
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    fetch("/meta").then(r=>r.json()).then(m => {
+      setMeta(m);
+      document.title = m.title || "Annotator";
+    });
+    fetch("/videos").then(r=>r.json()).then(d => {
+      setVideos(d.videos);
+      setVideosDir(d.dir);
+      if (d.videos.length) setVideoFile(d.videos[0]);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!videoFile) return;
+    setVideoInfo(null);
+    setSessionId(null); setFrameImg(null); setVideob64(null); setPoints([]); setNMasks(null); setStatus("");
+    fetch(`/video-info?name=${encodeURIComponent(videoFile)}`).then(r=>r.json()).then(setVideoInfo);
+  }, [videoFile]);
+
+  useEffect(() => {
+    if (!frameImg || !canvasRef.current) return;
+    const img = new Image();
+    img.onload = () => {
+      const c = canvasRef.current;
+      c.width = img.width; c.height = img.height;
+      c.getContext("2d").drawImage(img, 0, 0);
+    };
+    img.src = "data:image/jpeg;base64," + frameImg;
+  }, [frameImg]);
+
+  const loadFrames = async () => {
+    setLoading(true); setStatus("Extracting frames…"); setVideob64(null); setPoints([]); setNMasks(null);
+    const r = await post("/load", { video_path: videosDir + "/" + videoFile });
+    if (r.detail) { setStatus("Error: " + r.detail); setLoading(false); return; }
+    setSessionId(r.session_id);
+    setTotalFrames(r.total_frames);
+    setFrameIdx(0);
+    setFrameImg(r.frame);
+    setStatus(`${r.total_frames} frames extracted`);
+    setLoading(false);
+  };
+
+  const goToFrame = async (idx) => {
+    if (!sessionId) return;
+    setLoading(true);
+    const r = await post("/frame", { session_id: sessionId, frame_idx: idx });
+    setFrameIdx(idx); setFrameImg(r.frame); setPoints([]); setLoading(false);
+  };
+
+  const canvasClick = useCallback((e) => {
+    if (!sessionId || mode === "text") return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = canvasRef.current.width  / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top)  * scaleY;
+    setPoints(prev => [...prev, [x, y, mode === "pos" ? 1 : 0]]);
+  }, [sessionId, mode]);
+
+  const runPrompt = async () => {
+    if (!sessionId) return;
+    setLoading(true); setStatus((meta && meta.run_text_status) || "Running…"); setNMasks(null);
+    const body = { session_id: sessionId, frame_idx: frameIdx, text: "", points: [] };
+    if (mode === "text") body.text = prompt;
+    else body.points = points;
+    const r = await post("/prompt", body);
+    if (r.detail) { setStatus("Error: " + r.detail); setLoading(false); return; }
+    setFrameImg(r.frame);
+    setNMasks(r.n_masks);
+    setStatus(r.n_masks > 0 ? `${r.n_masks} mask(s) found` : "No masks — try another prompt or frame");
+    setLoading(false);
+  };
+
+  const propagate = async () => {
+    setLoading(true); setStatus("Propagating…"); setVideob64(null);
+    const r = await post("/propagate", { session_id: sessionId });
+    if (r.detail) { setStatus("Error: " + r.detail); setLoading(false); return; }
+    setVideob64(r.video_b64);
+    setMode("text");
+    setStatus(`Done — ${r.frames_with_masks} frame mask overlays written`);
+    setLoading(false);
+  };
+
+  const modeBtn = (m, label, activeClass) => (
+    <button onClick={() => setMode(m)}
+      className={`px-3 py-1 rounded text-sm font-medium border transition-colors ${
+        mode===m ? activeClass : "border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:text-zinc-300"
+      }`}>
+      {label}
+    </button>
+  );
+
+  const shortName = (name) => name.replace(
+    "Laparoscopic Cholecystectomy Full Length Skin to Skin Video with Near Infrared Cholangiography", "LC-NIC");
+
+  const textBtnClass = meta && meta.variant === "medsam3"
+    ? "border-purple-500 text-purple-400 bg-purple-950"
+    : "border-blue-500 text-blue-400 bg-blue-950";
+
+  return (
+    <div className="min-h-screen p-6 max-w-4xl mx-auto space-y-6">
+      <div>
+        <h1 className="text-xl font-bold text-white tracking-tight">{meta ? meta.title : "…"}</h1>
+        {meta && meta.subtitle && <p className="text-xs text-zinc-500 mt-1">{meta.subtitle}</p>}
+      </div>
+
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-4">
+        <div className="flex gap-2">
+          <select value={videoFile} onChange={e=>setVideoFile(e.target.value)}
+            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-zinc-500 truncate">
+            {videos.map(v => <option key={v} value={v}>{shortName(v)}</option>)}
+          </select>
+          <button onClick={loadFrames} disabled={loading || !videoFile}
+            className="px-4 py-2 bg-white text-black rounded-lg font-medium text-sm hover:bg-zinc-200 disabled:opacity-40 whitespace-nowrap">
+            Extract frames
+          </button>
+        </div>
+
+        {videoFile && (
+          <div className="flex gap-4 items-start">
+            <video key={videoFile} controls className="rounded-lg w-96 shrink-0 bg-black"
+              src={"/videos-raw/" + encodeURIComponent(videoFile)} />
+            {videoInfo ? (
+              <div className="grid grid-cols-2 gap-2 flex-1">
+                <MetaBadge label="Duration" value={videoInfo.duration_str} />
+                <MetaBadge label="FPS" value={videoInfo.fps} />
+                <MetaBadge label="Resolution" value={`${videoInfo.width}×${videoInfo.height}`} />
+                <MetaBadge label="Codec" value={videoInfo.codec} />
+                <MetaBadge label="Size" value={`${videoInfo.size_mb} MB`} />
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-500 mt-2">Loading info…</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {sessionId && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-4">
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-zinc-500 w-28 shrink-0">Frame {frameIdx} / {totalFrames-1}</span>
+            <input type="range" min={0} max={totalFrames-1} value={frameIdx}
+              onChange={e => goToFrame(Number(e.target.value))}
+              className="flex-1 accent-white" />
+          </div>
+
+          <div id="canvas-wrap" onClick={canvasClick}>
+            <canvas ref={canvasRef} className="w-full" />
+            {points.map(([x, y, pos], i) => {
+              const rect = canvasRef.current?.getBoundingClientRect();
+              const c = canvasRef.current;
+              if (!rect || !c) return null;
+              return <div key={i} className="dot"
+                style={{ left: x*(rect.width/c.width), top: y*(rect.height/c.height),
+                          background: pos ? "#22c55e" : "#ef4444" }} />;
+            })}
+          </div>
+
+          <div className="flex flex-wrap gap-2 items-center">
+            <div className="flex gap-1 items-center">
+              {modeBtn("text", (meta && meta.text_mode_label) || "Text", textBtnClass)}
+              {modeBtn("pos", "SAM2 +", "border-green-500 text-green-400 bg-green-950")}
+              {modeBtn("neg", "SAM2 −", "border-red-500 text-red-400 bg-red-950")}
+            </div>
+
+            {mode === "text" ? (
+              <input value={prompt} onChange={e=>setPrompt(e.target.value)}
+                className="flex-1 min-w-48 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-zinc-500"
+                placeholder="e.g. gallbladder" />
+            ) : points.length > 0 && (
+              <button onClick={() => setPoints([])} className="text-xs text-zinc-500 hover:text-white">Clear</button>
+            )}
+
+            <button onClick={runPrompt} disabled={loading || (mode !== "text" && points.length === 0)}
+              className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium disabled:opacity-40 ml-auto">
+              Annotate frame
+            </button>
+          </div>
+
+          {nMasks > 0 && (
+            <button onClick={propagate} disabled={loading}
+              className="w-full py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg font-medium text-sm disabled:opacity-40">
+              Propagate →
+            </button>
+          )}
+        </div>
+      )}
+
+      {status && (
+        <p className={`text-sm px-1 ${loading ? "text-yellow-400" : nMasks === 0 ? "text-orange-400" : "text-zinc-400"}`}>
+          {loading ? "⏳ " : ""}{status}
+        </p>
+      )}
+
+      {videob64 && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 space-y-2">
+          <h2 className="text-sm font-semibold text-zinc-300">Output</h2>
+          <video controls autoPlay loop className="w-full rounded-lg"
+            src={"data:video/mp4;base64," + videob64} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
